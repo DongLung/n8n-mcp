@@ -7,7 +7,7 @@ export const n8nManageAgentsDoc: ToolDocumentation = {
     description: 'Create, configure, validate, run and publish n8n Agents (persisted assistants) through n8n\'s instance-level MCP server. Needs N8N_MCP_ACCESS_TOKEN and n8n >= 2.34 with the agents module.',
     keyParameters: ['action', 'args', 'timeoutMs'],
     example: 'n8n_manage_agents({action: "reference"}) → n8n_manage_agents({action: "create", args: {name, config: {model: "openai/gpt-4o-mini", instructions: "..."}}})',
-    performance: '150-400 ms per action; call: 5-60 s per turn (one n8n execution each)',
+    performance: '150-400 ms per action (a second round trip when projectId is defaulted); call: 5-60 s per turn (one n8n execution each)',
     tips: [
       'Always read action=reference first: it returns the config schema and the exact mutate operations.',
       'Every mutate needs the configHash from the last get/create/mutate response; STALE_CONFIG means re-read it.',
@@ -17,7 +17,7 @@ export const n8nManageAgentsDoc: ToolDocumentation = {
     ],
   },
   full: {
-    description: `Thin adapter over n8n's official MCP agent tools. The action selects the official tool, args are forwarded verbatim, results are returned verbatim under data with our envelope and error codes.
+    description: `Thin adapter over n8n's official MCP agent tools. The action selects the official tool, args are forwarded unchanged apart from the projectId default described below, and results are returned verbatim under data with our envelope and error codes.
 
 Build sequence: reference → discover_assets (kind=models with provider, kind=integrations/workflows/subagents/mcpServers) → create (name, config, projectId?) → mutate per resource (config.patch is RFC 6902; skill.upsert/delete, task.upsert/delete, customTool.upsert/delete) → validate → call (test) → publish (only when asked).
 
@@ -40,10 +40,10 @@ Credentials: on this n8n generation the agents runtime rejects azureOpenAiApi an
       'n8n_manage_agents({action: "call", args: {agentId: "a1", request: {type: "message", message: "Summarise yesterday\'s tickets"}}, timeoutMs: 300000})',
     ],
     useCases: ['Build a persisted n8n Agent from a spec', 'Add skills, tasks and custom tools to an existing agent', 'Validate and test-run an agent before the user publishes it', 'Inspect agent versions and revert'],
-    performance: 'Each action is one HTTP round trip to the instance; call adds the model latency.',
+    performance: 'Each action is one HTTP round trip to the instance, plus a search_projects lookup first when create, discover_assets or verify_mcp_server defaults projectId; call adds the model latency.',
     errorHandling: 'STALE_CONFIG → get and retry with the new configHash. AGENT_NOT_RUNNABLE → validate and fix errors/missing. OFFICIAL_MCP_TIMEOUT on call → the turn continues in n8n; reuse sessionId instead of re-sending.',
     bestPractices: ['One mutate per resource, re-reading configHash between them', 'Validate before call and before publish', 'Name test agents "[TEST] …" and delete them afterwards', 'Never publish, delete or approve without the user saying so'],
-    pitfalls: ['args are forwarded verbatim — a misspelled field is reported by n8n as INVALID_ARGS', 'timeoutMs belongs at the top level, not inside args', 'The MCP access token is separate from the Public API key'],
+    pitfalls: ['args are forwarded unchanged apart from the projectId default — a misspelled field is reported by n8n as INVALID_ARGS', 'timeoutMs belongs at the top level, not inside args', 'The MCP access token is separate from the Public API key'],
     relatedTools: ['n8n_manage_credentials', 'n8n_list_catalog', 'n8n_executions', 'n8n_health_check'],
   },
 };

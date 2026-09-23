@@ -3,7 +3,8 @@
  *
  * Validates the action/timeout envelope, resolves the current alias for the
  * requested action against the connected instance's tool list, forwards
- * `args` verbatim to the official tool, and maps the official response
+ * `args` to the official tool (filling in a default projectId where the
+ * action needs one), and maps the official response
  * shapes onto this server's response envelope. All business logic for
  * *what* an action does lives in n8n's own MCP server; this file only
  * translates between the two contracts.
@@ -153,6 +154,8 @@ export async function handleManageAgents(args: unknown, context?: InstanceContex
   if (!client) return notConfiguredResponse(context, action);
 
   const spec = AGENT_ACTION_MAP[action];
+  // Outside the try so a call that throws after the lookup still reports it.
+  let defaultedProjectId: string | undefined;
   try {
     const caps = await client.capabilities();
     if (!caps.reachable) {
@@ -176,7 +179,6 @@ export async function handleManageAgents(args: unknown, context?: InstanceContex
 
     const callTimeoutMs = timeoutMs ?? spec.defaultTimeoutMs;
     let callArgs = toolArgs;
-    let defaultedProjectId: string | undefined;
     // null and "" count as omitted: LLM callers send them for "unset".
     const requested = toolArgs.projectId;
     const wantsPersonalProject = spec.defaultsToPersonalProject
@@ -237,7 +239,8 @@ export async function handleManageAgents(args: unknown, context?: InstanceContex
     if (hint) response.hint = hint;
     return response;
   } catch (err) {
-    const failure = officialFailure(err, action);
+    const failure: McpToolResponse = officialFailure(err, action);
+    if (defaultedProjectId) failure.defaultedProjectId = defaultedProjectId;
     if (failure.code === 'OFFICIAL_MCP_TIMEOUT' && action === 'call') {
       failure.hint = OFFICIAL_MCP_HINTS.OFFICIAL_MCP_TIMEOUT + ' Each agent turn is one n8n execution; the executionId appears in n8n_executions once the turn finishes.';
     }

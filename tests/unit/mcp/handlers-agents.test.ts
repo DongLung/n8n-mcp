@@ -308,6 +308,17 @@ describe('handleManageAgents projectId default', () => {
     expect(r.hint).toBeUndefined();
   });
 
+  it('keeps defaultedProjectId when the action call itself throws after the lookup', async () => {
+    const client = fakeClient(TOOLS);
+    client.callTool.mockImplementation(async (name: string) => {
+      if (name === 'search_projects') return { isError: false, text: JSON.stringify(PERSONAL), json: PERSONAL, sizeBytes: 10, truncated: false };
+      throw new OfficialMcpError('OFFICIAL_MCP_TIMEOUT', 'timed out');
+    });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'discover_assets', args: { kind: 'models' } });
+    expect(r).toMatchObject({ success: false, code: 'OFFICIAL_MCP_TIMEOUT', defaultedProjectId: 'pp1' });
+  });
+
   it('forwards unchanged when the personal-project lookup throws', async () => {
     const client = fakeClient(TOOLS);
     client.callTool.mockImplementation(async (name: string) => {

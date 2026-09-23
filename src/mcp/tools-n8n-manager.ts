@@ -933,7 +933,7 @@ Two sources:
       type: 'object',
       properties: {
         action: { type: 'string', enum: AGENT_ACTIONS, description: 'Operation to perform' },
-        args: { type: 'object', description: 'Arguments for the action, forwarded to n8n verbatim. See tools_documentation("n8n_manage_agents", "full") for the per-action fields.' },
+        args: { type: 'object', description: 'Arguments for the action, forwarded to n8n unchanged except that an omitted, null, empty or "personal" projectId on create, discover_assets and verify_mcp_server is replaced with your personal project ID. See tools_documentation("n8n_manage_agents", "full") for the per-action fields.' },
         timeoutMs: { type: 'integer', minimum: 5000, maximum: 600000, description: 'Request timeout in ms. Default 30000; 180000 for action=call. The agent run continues in n8n even if this expires.' },
       },
       required: ['action'],

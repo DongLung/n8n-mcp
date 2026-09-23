@@ -56,6 +56,28 @@ function invalid(action: string | undefined, message: string): McpToolResponse {
   return { success: false, action, code: 'INVALID_ARGS', error: message };
 }
 
+const PERSONAL_PROJECT_ALIAS = 'personal';
+const PROJECT_ID_HINT = "projectId could not be defaulted to your personal project. List the projects with n8n_list_catalog({kind: 'projects'}) and pass one as args.projectId.";
+
+/**
+ * The personal project of the MCP token's user, read with the official
+ * `search_projects` tool. That tool lists only projects the caller has a
+ * relation to, so `type: personal` returns the caller's own project and never
+ * another user's, even for an instance owner. Returns undefined when the tool
+ * is missing, the call fails, or the answer is not exactly one project; the
+ * request then goes to n8n unchanged and n8n reports the missing projectId.
+ */
+async function personalProjectId(client: N8nOfficialMcpClient, toolNames: string[]): Promise<string | undefined> {
+  if (!toolNames.includes('search_projects')) return undefined;
+  try {
+    const result = await client.callTool('search_projects', { type: 'personal' }, { timeoutMs: DEFAULT_TIMEOUT_MS, idempotent: true });
+    const projects = ((result.json as any)?.data ?? []).filter((p: any) => p?.type === 'personal' && typeof p.id === 'string');
+    return projects.length === 1 ? projects[0].id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Resolves the credential id implicated by a "missing credential" outcome,
  * from the official result alone — `args` never carries a credential id for
@@ -149,7 +171,16 @@ export async function handleManageAgents(args: unknown, context?: InstanceContex
       return { success: true, action, officialTool: tool, data: await client.reference(tool) };
     }
 
-    const result: OfficialToolResult = await client.callTool(tool, toolArgs, { timeoutMs: timeoutMs ?? spec.defaultTimeoutMs, idempotent: spec.idempotent });
+    let callArgs = toolArgs;
+    let defaultedProjectId: string | undefined;
+    const wantsPersonalProject = spec.defaultsToPersonalProject
+      && (toolArgs.projectId === undefined || toolArgs.projectId === PERSONAL_PROJECT_ALIAS);
+    if (wantsPersonalProject) {
+      defaultedProjectId = await personalProjectId(client, caps.toolNames);
+      if (defaultedProjectId) callArgs = { ...toolArgs, projectId: defaultedProjectId };
+    }
+
+    const result: OfficialToolResult = await client.callTool(tool, callArgs, { timeoutMs: timeoutMs ?? spec.defaultTimeoutMs, idempotent: spec.idempotent });
     const data = result.json ?? result.text;
 
     // "Input validation error" is the literal prefix n8n's MCP server puts on
@@ -158,7 +189,11 @@ export async function handleManageAgents(args: unknown, context?: InstanceContex
     // that wording, invalid args stop mapping to INVALID_ARGS and degrade to
     // OFFICIAL_MCP_ERROR; nothing else breaks.
     // Error text is capped at 2000 chars — n8n's error text is untrusted output.
-    if (result.text.startsWith('Input validation error')) return invalid(action, result.text.slice(0, 2000));
+    if (result.text.startsWith('Input validation error')) {
+      const response = invalid(action, result.text.slice(0, 2000));
+      if (wantsPersonalProject && !defaultedProjectId) response.hint = PROJECT_ID_HINT;
+      return response;
+    }
 
     const officialCode = (data as any)?.ok === false ? (data as any)?.code : undefined;
     if (result.isError || officialCode) {
@@ -171,17 +206,19 @@ export async function handleManageAgents(args: unknown, context?: InstanceContex
         error: officialErrorText(data, officialCode),
         officialError: data,
       };
+      if (defaultedProjectId) response.defaultedProjectId = defaultedProjectId;
       // A credential-type hint (derived from the result itself) takes
       // precedence over the generic mapped hint when both apply.
-      const credHint = await credentialTypeHint(toolArgs, data, client, context);
+      const credHint = await credentialTypeHint(callArgs, data, client, context);
       const hint = credHint ?? mapped?.hint;
       if (hint) response.hint = hint;
       return response;
     }
 
     const response: McpToolResponse = { success: true, action, officialTool: tool, data };
+    if (defaultedProjectId) response.defaultedProjectId = defaultedProjectId;
     if (result.truncated) response.truncated = true;
-    const hint = await credentialTypeHint(toolArgs, data, client, context);
+    const hint = await credentialTypeHint(callArgs, data, client, context);
     if (hint) response.hint = hint;
     return response;
   } catch (err) {

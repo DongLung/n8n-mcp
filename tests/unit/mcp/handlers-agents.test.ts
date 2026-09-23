@@ -198,3 +198,74 @@ describe('resolveOfficialTool', () => {
     expect(resolveOfficialTool({ tools: ['mutate_agent'], defaultTimeoutMs: 1, destructive: false, idempotent: false }, [])).toBeNull();
   });
 });
+
+describe('handleManageAgents projectId default', () => {
+  const PERSONAL = { ok: true, data: [{ id: 'pp1', name: 'Me <me@example.com>', type: 'personal' }], count: 1, teamProjectsEnabled: false };
+  const TOOLS = [...ALL, 'search_projects'];
+
+  it('fills an omitted projectId with the token user\'s personal project', async () => {
+    const client = fakeClient(TOOLS, { search_projects: PERSONAL, discover_agent_assets: { ok: true, models: [] } });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'discover_assets', args: { kind: 'models', provider: 'minimax' } });
+    expect(client.callTool).toHaveBeenCalledWith('search_projects', { type: 'personal' }, { timeoutMs: 30_000, idempotent: true });
+    expect(client.callTool).toHaveBeenLastCalledWith('discover_agent_assets', { kind: 'models', provider: 'minimax', projectId: 'pp1' }, { timeoutMs: 30_000, idempotent: true });
+    expect(r).toMatchObject({ success: true, action: 'discover_assets', defaultedProjectId: 'pp1' });
+  });
+
+  it('resolves the "personal" alias on create and verify_mcp_server', async () => {
+    const client = fakeClient(TOOLS, { search_projects: PERSONAL });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    await handleManageAgents({ action: 'create', args: { projectId: 'personal', name: 'x' } });
+    expect(client.callTool).toHaveBeenLastCalledWith('create_agent', { projectId: 'pp1', name: 'x' }, { timeoutMs: 30_000, idempotent: false });
+    await handleManageAgents({ action: 'verify_mcp_server', args: { name: 'm', url: 'https://mcp.example.com' } });
+    expect(client.callTool).toHaveBeenLastCalledWith('verify_agent_mcp_server', { name: 'm', url: 'https://mcp.example.com', projectId: 'pp1' }, expect.anything());
+  });
+
+  it('keeps an explicit projectId and never defaults search\'s optional filter', async () => {
+    const client = fakeClient(TOOLS, { search_projects: PERSONAL });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'create', args: { projectId: 'team1', name: 'x' } });
+    await handleManageAgents({ action: 'search', args: {} });
+    expect(client.callTool).not.toHaveBeenCalledWith('search_projects', expect.anything(), expect.anything());
+    expect(client.callTool).toHaveBeenCalledWith('create_agent', { projectId: 'team1', name: 'x' }, expect.anything());
+    expect(client.callTool).toHaveBeenLastCalledWith('search_agents', {}, expect.anything());
+    expect(r.defaultedProjectId).toBeUndefined();
+  });
+
+  it.each([
+    ['two personal projects', { ok: true, data: [{ id: 'a', type: 'personal' }, { id: 'b', type: 'personal' }] }],
+    ['no personal project', { ok: true, data: [] }],
+  ])('forwards the call unchanged and adds a hint when %s come back', async (_label, projects) => {
+    const client = fakeClient(TOOLS, { search_projects: projects });
+    client.callTool.mockImplementation(async (name: string) => name === 'search_projects'
+      ? { isError: false, text: JSON.stringify(projects), json: projects, sizeBytes: 10, truncated: false }
+      : { isError: true, text: 'Input validation error: Invalid arguments for tool discover_agent_assets: projectId: Required', json: undefined, sizeBytes: 10, truncated: false });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'discover_assets', args: { kind: 'models' } });
+    expect(client.callTool).toHaveBeenLastCalledWith('discover_agent_assets', { kind: 'models' }, expect.anything());
+    expect(r).toMatchObject({ success: false, code: 'INVALID_ARGS' });
+    expect(r.hint).toContain("n8n_list_catalog({kind: 'projects'})");
+    expect(r.defaultedProjectId).toBeUndefined();
+  });
+
+  it('does not look for the personal project when the instance has no search_projects tool', async () => {
+    const client = fakeClient(ALL);
+    access.getOfficialMcpClient.mockReturnValue(client);
+    await handleManageAgents({ action: 'discover_assets', args: { kind: 'models' } });
+    expect(client.callTool).toHaveBeenCalledTimes(1);
+    expect(client.callTool).toHaveBeenCalledWith('discover_agent_assets', { kind: 'models' }, expect.anything());
+  });
+
+  it('forwards unchanged when the personal-project lookup throws', async () => {
+    const client = fakeClient(TOOLS);
+    client.callTool.mockImplementation(async (name: string) => {
+      if (name === 'search_projects') throw new OfficialMcpError('OFFICIAL_MCP_TIMEOUT', 'timed out');
+      return { isError: false, text: '{"ok":true}', json: { ok: true }, sizeBytes: 10, truncated: false };
+    });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'create', args: { name: 'x' } });
+    expect(client.callTool).toHaveBeenLastCalledWith('create_agent', { name: 'x' }, expect.anything());
+    expect(r).toMatchObject({ success: true });
+    expect(r.defaultedProjectId).toBeUndefined();
+  });
+});

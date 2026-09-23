@@ -207,7 +207,7 @@ describe('handleManageAgents projectId default', () => {
     const client = fakeClient(TOOLS, { search_projects: PERSONAL, discover_agent_assets: { ok: true, models: [] } });
     access.getOfficialMcpClient.mockReturnValue(client);
     const r = await handleManageAgents({ action: 'discover_assets', args: { kind: 'models', provider: 'minimax' } });
-    expect(client.callTool).toHaveBeenCalledWith('search_projects', { type: 'personal' }, { timeoutMs: 30_000, idempotent: true });
+    expect(client.callTool).toHaveBeenCalledWith('search_projects', { type: 'personal', limit: 2 }, { timeoutMs: 30_000, idempotent: true });
     expect(client.callTool).toHaveBeenLastCalledWith('discover_agent_assets', { kind: 'models', provider: 'minimax', projectId: 'pp1' }, { timeoutMs: 30_000, idempotent: true });
     expect(r).toMatchObject({ success: true, action: 'discover_assets', defaultedProjectId: 'pp1' });
   });
@@ -254,6 +254,58 @@ describe('handleManageAgents projectId default', () => {
     await handleManageAgents({ action: 'discover_assets', args: { kind: 'models' } });
     expect(client.callTool).toHaveBeenCalledTimes(1);
     expect(client.callTool).toHaveBeenCalledWith('discover_agent_assets', { kind: 'models' }, expect.anything());
+  });
+
+  it('treats null and "" as omitted, and drops them when the lookup fails', async () => {
+    const client = fakeClient(TOOLS, { search_projects: PERSONAL });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'create', args: { projectId: null, name: 'x' } });
+    expect(client.callTool).toHaveBeenLastCalledWith('create_agent', { projectId: 'pp1', name: 'x' }, expect.anything());
+    expect(r.defaultedProjectId).toBe('pp1');
+
+    const noLookup = fakeClient(ALL);
+    access.getOfficialMcpClient.mockReturnValue(noLookup);
+    await handleManageAgents({ action: 'create', args: { projectId: '', name: 'x' } });
+    expect(noLookup.callTool).toHaveBeenLastCalledWith('create_agent', { name: 'x' }, expect.anything());
+  });
+
+  it('refuses an unresolved "personal" alias instead of sending it to n8n as a project ID', async () => {
+    const client = fakeClient(ALL);
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'create', args: { projectId: 'personal', name: 'x' } });
+    expect(r).toMatchObject({ success: false, action: 'create', code: 'INVALID_ARGS' });
+    expect(r.hint).toContain('n8n_list_catalog');
+    expect(client.callTool).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an error result', { ok: false, code: 'forbidden' }],
+    ['a count above one on a truncated page', { ok: true, data: [{ id: 'a', type: 'personal' }], count: 3 }],
+  ])('does not default from %s', async (_label, projects) => {
+    const client = fakeClient(TOOLS, { search_projects: projects });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'create', args: { name: 'x' } });
+    expect(client.callTool).toHaveBeenLastCalledWith('create_agent', { name: 'x' }, expect.anything());
+    expect(r.defaultedProjectId).toBeUndefined();
+  });
+
+  it('picks the personal entry and ignores team projects in the answer', async () => {
+    const client = fakeClient(TOOLS, { search_projects: { ok: true, data: [{ id: 't1', type: 'team' }, { id: 'pp1', type: 'personal' }] } });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'create', args: { name: 'x' } });
+    expect(r.defaultedProjectId).toBe('pp1');
+  });
+
+  it('reports defaultedProjectId when n8n rejects another argument, and caps the lookup at the caller timeout', async () => {
+    const client = fakeClient(TOOLS);
+    client.callTool.mockImplementation(async (name: string) => name === 'search_projects'
+      ? { isError: false, text: JSON.stringify(PERSONAL), json: PERSONAL, sizeBytes: 10, truncated: false }
+      : { isError: true, text: 'Input validation error: kind: Required', json: undefined, sizeBytes: 10, truncated: false });
+    access.getOfficialMcpClient.mockReturnValue(client);
+    const r = await handleManageAgents({ action: 'discover_assets', args: {}, timeoutMs: 5_000 });
+    expect(client.callTool).toHaveBeenCalledWith('search_projects', expect.anything(), { timeoutMs: 5_000, idempotent: true });
+    expect(r).toMatchObject({ success: false, code: 'INVALID_ARGS', defaultedProjectId: 'pp1' });
+    expect(r.hint).toBeUndefined();
   });
 
   it('forwards unchanged when the personal-project lookup throws', async () => {

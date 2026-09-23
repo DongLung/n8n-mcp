@@ -21,7 +21,7 @@ export const n8nManageAgentsDoc: ToolDocumentation = {
 
 Build sequence: reference → discover_assets (kind=models with provider, kind=integrations/workflows/subagents/mcpServers) → create (name, config, projectId?) → mutate per resource (config.patch is RFC 6902; skill.upsert/delete, task.upsert/delete, customTool.upsert/delete) → validate → call (test) → publish (only when asked).
 
-projectId: create, discover_assets and verify_mcp_server need a project. When args.projectId is omitted or is "personal", the personal project of the MCP access token's user is filled in (read with n8n's search_projects) and returned as defaultedProjectId. If it cannot be resolved, the request goes to n8n unchanged and the INVALID_ARGS response carries a hint to pass projectId. search takes projectId only as an optional filter and is never defaulted.
+projectId: create, discover_assets and verify_mcp_server need a project. When args.projectId is omitted, null, empty or "personal", the personal project of the MCP access token's user is filled in (read with n8n's search_projects) and returned as defaultedProjectId. If it cannot be resolved, "personal" is refused with INVALID_ARGS before anything is sent, and an omitted projectId is left for n8n to report; both responses carry a hint to pass projectId. search takes projectId only as an optional filter and is never defaulted.
 
 Gates: reference and search work for every agent; all other actions need the agent exposed to MCP (agents created here are exposed automatically).
 

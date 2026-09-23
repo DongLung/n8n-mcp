@@ -64,14 +64,17 @@ const PROJECT_ID_HINT = "projectId could not be defaulted to your personal proje
  * `search_projects` tool. That tool lists only projects the caller has a
  * relation to, so `type: personal` returns the caller's own project and never
  * another user's, even for an instance owner. Returns undefined when the tool
- * is missing, the call fails, or the answer is not exactly one project; the
- * request then goes to n8n unchanged and n8n reports the missing projectId.
+ * is missing, the call fails, or the answer is not exactly one project
+ * (`limit: 2` plus `count` keep a truncated answer from passing as unique).
  */
-async function personalProjectId(client: N8nOfficialMcpClient, toolNames: string[]): Promise<string | undefined> {
+async function personalProjectId(client: N8nOfficialMcpClient, toolNames: string[], timeoutMs: number): Promise<string | undefined> {
   if (!toolNames.includes('search_projects')) return undefined;
   try {
-    const result = await client.callTool('search_projects', { type: 'personal' }, { timeoutMs: DEFAULT_TIMEOUT_MS, idempotent: true });
-    const projects = ((result.json as any)?.data ?? []).filter((p: any) => p?.type === 'personal' && typeof p.id === 'string');
+    const result = await client.callTool('search_projects', { type: 'personal', limit: 2 }, { timeoutMs, idempotent: true });
+    const json = result.json as any;
+    if (result.isError || json?.ok === false) return undefined;
+    if (typeof json?.count === 'number' && json.count !== 1) return undefined;
+    const projects = (Array.isArray(json?.data) ? json.data : []).filter((p: any) => p?.type === 'personal' && typeof p.id === 'string');
     return projects.length === 1 ? projects[0].id : undefined;
   } catch {
     return undefined;
@@ -171,16 +174,27 @@ export async function handleManageAgents(args: unknown, context?: InstanceContex
       return { success: true, action, officialTool: tool, data: await client.reference(tool) };
     }
 
+    const callTimeoutMs = timeoutMs ?? spec.defaultTimeoutMs;
     let callArgs = toolArgs;
     let defaultedProjectId: string | undefined;
+    // null and "" count as omitted: LLM callers send them for "unset".
+    const requested = toolArgs.projectId;
     const wantsPersonalProject = spec.defaultsToPersonalProject
-      && (toolArgs.projectId === undefined || toolArgs.projectId === PERSONAL_PROJECT_ALIAS);
+      && (requested === undefined || requested === null || requested === '' || requested === PERSONAL_PROJECT_ALIAS);
     if (wantsPersonalProject) {
-      defaultedProjectId = await personalProjectId(client, caps.toolNames);
-      if (defaultedProjectId) callArgs = { ...toolArgs, projectId: defaultedProjectId };
+      defaultedProjectId = await personalProjectId(client, caps.toolNames, Math.min(callTimeoutMs, DEFAULT_TIMEOUT_MS));
+      if (defaultedProjectId) {
+        callArgs = { ...toolArgs, projectId: defaultedProjectId };
+      } else if (requested === PERSONAL_PROJECT_ALIAS) {
+        // n8n would take the alias as a literal project ID and answer not-found.
+        return { ...invalid(action, 'projectId "personal" could not be resolved to your personal project.'), hint: PROJECT_ID_HINT };
+      } else if (requested !== undefined) {
+        const { projectId: _omit, ...rest } = toolArgs;
+        callArgs = rest;
+      }
     }
 
-    const result: OfficialToolResult = await client.callTool(tool, callArgs, { timeoutMs: timeoutMs ?? spec.defaultTimeoutMs, idempotent: spec.idempotent });
+    const result: OfficialToolResult = await client.callTool(tool, callArgs, { timeoutMs: callTimeoutMs, idempotent: spec.idempotent });
     const data = result.json ?? result.text;
 
     // "Input validation error" is the literal prefix n8n's MCP server puts on
@@ -191,7 +205,8 @@ export async function handleManageAgents(args: unknown, context?: InstanceContex
     // Error text is capped at 2000 chars — n8n's error text is untrusted output.
     if (result.text.startsWith('Input validation error')) {
       const response = invalid(action, result.text.slice(0, 2000));
-      if (wantsPersonalProject && !defaultedProjectId) response.hint = PROJECT_ID_HINT;
+      if (defaultedProjectId) response.defaultedProjectId = defaultedProjectId;
+      else if (wantsPersonalProject) response.hint = PROJECT_ID_HINT;
       return response;
     }
 

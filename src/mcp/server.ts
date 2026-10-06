@@ -15,6 +15,7 @@ import { existsSync, readFileSync, promises as fs } from 'fs';
 import path from 'path';
 import { n8nDocumentationToolsFinal } from './tools';
 import { UIAppRegistry, isUIAppsEnabled } from './ui';
+import { getRequestScope } from '../utils/request-context';
 import { SkillResourceRegistry } from './skills';
 import { n8nManagementTools, TOOL_OPERATION_PARAM, DESTRUCTIVE_TOOL_OPERATIONS } from './tools-n8n-manager';
 import {
@@ -201,6 +202,11 @@ type NodeInfoResponse = NodeMinimalInfo | NodeStandardInfo | NodeFullInfo | Vers
 
 interface MCPServerOptions {
   additionalTools?: AdditionalTool[];
+  /**
+   * SECURITY (GHSA-74jq-crxq-6x63): the instance context must come from the
+   * current request.
+   */
+  requireRequestContext?: boolean;
 }
 
 export class N8NDocumentationMCPServer {
@@ -212,7 +218,8 @@ export class N8NDocumentationMCPServer {
   private initialized: Promise<void>;
   private cache = new SimpleCache();
   private clientInfo: any = null;
-  private instanceContext?: InstanceContext;
+  private sessionInstanceContext?: InstanceContext;
+  private requireRequestContext = false;
   private previousTool: string | null = null;
   private previousToolTimestamp: number = Date.now();
   private earlyLogger: EarlyErrorLogger | null = null;
@@ -239,7 +246,8 @@ export class N8NDocumentationMCPServer {
       installStdioGuard();
     }
 
-    this.instanceContext = instanceContext;
+    this.sessionInstanceContext = instanceContext;
+    this.requireRequestContext = options?.requireRequestContext === true;
     this.earlyLogger = earlyLogger || null;
     this.registerAdditionalTools(options?.additionalTools || []);
     // Check for test environment first
@@ -334,6 +342,20 @@ export class N8NDocumentationMCPServer {
     UIAppRegistry.load();
     SkillResourceRegistry.load();
     this.setupHandlers();
+  }
+
+  // SECURITY (GHSA-74jq-crxq-6x63): request-scoped instance context.
+  private get instanceContext(): InstanceContext | undefined {
+    const scope = getRequestScope(this);
+    if (scope) return scope.instanceContext;
+    if (this.requireRequestContext) {
+      throw new Error('Instance context is not available for this request');
+    }
+    return this.sessionInstanceContext;
+  }
+
+  private set instanceContext(instanceContext: InstanceContext | undefined) {
+    this.sessionInstanceContext = instanceContext;
   }
 
   private registerAdditionalTools(additionalTools: AdditionalTool[]): void {

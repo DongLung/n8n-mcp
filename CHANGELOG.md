@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.92.1] - 2026-10-06
+
+### Security
+
+- Fix instance context handling on multi-tenant HTTP sessions (GHSA-74jq-crxq-6x63).
+
 ## [2.92.0] - 2026-10-06
 
 ### Added

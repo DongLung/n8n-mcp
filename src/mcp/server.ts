@@ -14,7 +14,7 @@ import type { McpToolResponse } from '../types/n8n-api';
 import { existsSync, readFileSync, promises as fs } from 'fs';
 import path from 'path';
 import { n8nDocumentationToolsFinal } from './tools';
-import { UIAppRegistry } from './ui';
+import { UIAppRegistry, isUIAppsEnabled } from './ui';
 import { SkillResourceRegistry } from './skills';
 import { n8nManagementTools, TOOL_OPERATION_PARAM, DESTRUCTIVE_TOOL_OPERATIONS } from './tools-n8n-manager';
 import {
@@ -853,7 +853,9 @@ export class N8NDocumentationMCPServer {
         tools = tools.map(tool => this.filteredToolDefinitionsCache!.get(tool.name) ?? tool);
       }
 
-      UIAppRegistry.injectToolMeta(tools);
+      if (isUIAppsEnabled(this.instanceContext)) {
+        tools = UIAppRegistry.injectToolMeta(tools);
+      }
       return { tools };
     });
 
@@ -861,9 +863,10 @@ export class N8NDocumentationMCPServer {
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       const isAdditionalTool = this.additionalToolsByName.has(name);
-      const resultMeta = !isAdditionalTool && UIAppRegistry.getAppForTool(name)?.html
-        ? { _meta: { 'n8n-mcp/toolName': name } }
-        : {};
+      const hasUIApp = !isAdditionalTool
+        && isUIAppsEnabled(this.instanceContext)
+        && Boolean(UIAppRegistry.getAppForTool(name)?.html);
+      const resultMeta = hasUIApp ? { _meta: { 'n8n-mcp/toolName': name } } : {};
       
       // SECURITY (GHSA-wg4g-395p-mqv3): log metadata only, not raw arg values.
       logger.info('Tool call received', {
@@ -1133,7 +1136,7 @@ export class N8NDocumentationMCPServer {
 
     // Handle ListResources: UI apps + skill markdown
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      const apps = UIAppRegistry.getAllApps();
+      const apps = isUIAppsEnabled(this.instanceContext) ? UIAppRegistry.getAllApps() : [];
       const skills = SkillResourceRegistry.getAll();
       return {
         resources: [

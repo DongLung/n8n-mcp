@@ -506,19 +506,37 @@ export class SingleSessionHTTPServer {
   }
 
   /**
-   * Switch session context with locking to prevent race conditions
+   * Switch session context with locking to prevent race conditions.
+   *
+   * With `mergeOverStored`, `newContext` holds only the fields a request supplied and
+   * is merged over the stored context once this call holds the lock. Merging before
+   * the wait would let a queued request write back values that a request ahead of it
+   * has since replaced.
    */
-  private async switchSessionContext(sessionId: string, newContext: InstanceContext): Promise<void> {
-    // Check if there's already a switch in progress for this session
-    const existingLock = this.contextSwitchLocks.get(sessionId);
-    if (existingLock) {
-      // Wait for the existing switch to complete
-      await existingLock;
-      return;
+  private async switchSessionContext(
+    sessionId: string,
+    newContext: InstanceContext,
+    mergeOverStored = false
+  ): Promise<void> {
+    // Wait for any switch already in progress for this session, then apply this
+    // request's context as well. Returning after the wait would drop it, leaving the
+    // session on the context of whichever request got there first.
+    let existingLock = this.contextSwitchLocks.get(sessionId);
+    while (existingLock) {
+      await existingLock.catch(() => undefined);
+      existingLock = this.contextSwitchLocks.get(sessionId);
+    }
+
+    let contextToApply = newContext;
+    if (mergeOverStored) {
+      const storedContext = this.sessionContexts[sessionId];
+      // The session went away while this request waited; there is nothing to refresh.
+      if (!storedContext) return;
+      contextToApply = { ...storedContext, ...newContext };
     }
 
     // Create a promise for this switch operation
-    const switchPromise = this.performContextSwitch(sessionId, newContext);
+    const switchPromise = this.performContextSwitch(sessionId, contextToApply);
     this.contextSwitchLocks.set(sessionId, switchPromise);
 
     try {
@@ -699,6 +717,28 @@ export class SingleSessionHTTPServer {
             }
             return;
           }
+        }
+
+        // #1152: embedders hand the context over directly, and it may come from untyped
+        // JSON. A non-boolean switch (the string "false") would read as enabled here and
+        // would later make validateInstanceContext reject the whole context, so refuse
+        // it up front instead of storing it on a session.
+        if (instanceContext?.uiAppsEnabled !== undefined && typeof instanceContext.uiAppsEnabled !== 'boolean') {
+          logger.warn('Instance context rejected: uiAppsEnabled must be a boolean', {
+            receivedType: typeof instanceContext.uiAppsEnabled,
+            instanceId: instanceContext.instanceId
+          });
+          if (!res.headersSent) {
+            res.status(400).json({
+              jsonrpc: '2.0',
+              error: {
+                code: -32602,
+                message: 'Invalid instance configuration: uiAppsEnabled must be a boolean'
+              },
+              id: req.body?.id ?? null
+            });
+          }
+          return;
         }
 
         const sessionId = req.headers['mcp-session-id'] as string | undefined;
@@ -937,10 +977,7 @@ export class SingleSessionHTTPServer {
               storedContext?.instanceId === instanceContext.instanceId &&
               storedContext?.n8nApiUrl === instanceContext.n8nApiUrl
             ) {
-              await this.switchSessionContext(sessionId, {
-                ...storedContext,
-                ...pickInstanceContextFields(instanceContext)
-              });
+              await this.switchSessionContext(sessionId, pickInstanceContextFields(instanceContext), true);
             }
           }
 
